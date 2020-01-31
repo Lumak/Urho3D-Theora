@@ -15,7 +15,7 @@ Description
 
 Screenshot
 ----
-![alt tag](https://github.com/Lumak/Urho3D-Theora/blob/master/screenshot/screenshot.gng)
+![alt tag](https://github.com/Lumak/Urho3D-Theora/blob/master/screenshot/screenshot.png)
 
 
 To Build
