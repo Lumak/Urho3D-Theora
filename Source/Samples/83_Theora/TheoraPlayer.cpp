@@ -38,7 +38,7 @@
 #include <Urho3D/UI/UI.h>
 
 #include "TheoraPlayer.h"
-#include "TVComponent.h"
+#include "Theora.h"
 
 #include <Urho3D/DebugNew.h>
 //=============================================================================
@@ -50,7 +50,7 @@ URHO3D_DEFINE_APPLICATION_MAIN(TheoraPlayer)
 TheoraPlayer::TheoraPlayer(Context* context)
     : Sample(context)
 {
-	TVComponent::RegisterObject(context);
+	Theora::RegisterObject(context);
 }
 
 void TheoraPlayer::Setup()
@@ -59,9 +59,8 @@ void TheoraPlayer::Setup()
     engineParameters_["WindowWidth"] = 1280;
     engineParameters_["WindowHeight"] = 720;
     engineParameters_["FullScreen"] = false;
-    //engineParameters_["VSync"] = true;
-    //engineParameters_["FrameLimiter "] = true;
     engineParameters_[EP_SOUND] = true;
+    engineParameters_[EP_SOUND_BUFFER] = 20;
     engineParameters_["ResourcePaths"] = "Data;CoreData;Data/Theora";
     engineParameters_["LogName"]      = GetSubsystem<FileSystem>()->GetProgramDir() + "theora.log";
 }
@@ -115,11 +114,12 @@ void TheoraPlayer::CreateScene()
 
     if (tvNode)
     {
-        tvc_ = tvNode->CreateComponent<TVComponent>();
-        tvc_->OpenFileName(GetSubsystem<FileSystem>()->GetProgramDir()+ "Data/Theora/Video/bbb_theora_486kbit.ogv");
-
-        StaticModel *sm = tvNode->GetComponent<StaticModel>();
-        tvc_->SetOutputModel(sm);
+        tvc_ = tvNode->CreateComponent<Theora>();
+        if (tvc_->OpenFileName(GetSubsystem<FileSystem>()->GetProgramDir()+ "Data/Theora/Video/bbb_theora_486kbit.ogv"))
+        {
+            StaticModel *sm = tvNode->GetComponent<StaticModel>();
+            tvc_->SetOutputModel(sm);
+        }
     }
 }
 

@@ -32,7 +32,7 @@ class Node;
 class Scene;
 }
 
-class TVComponent;
+class Theora;
 
 //=============================================================================
 //=============================================================================
@@ -60,6 +60,6 @@ private:
     void HandleUpdate(StringHash eventType, VariantMap& eventData);
 
 private:
-	SharedPtr<TVComponent> tvc_;
+	SharedPtr<Theora> tvc_;
 
 };
