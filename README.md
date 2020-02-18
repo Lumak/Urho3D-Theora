@@ -12,6 +12,7 @@ Description
  * added YUV420 to RGBA conversion fn
  * minor clean up and fixed memory leak
  * added libtheora, libogg, and libvorbis source files into the ThirdParty folder to build with Urho3D
+ * added sound
 
 Screenshot
 ----
