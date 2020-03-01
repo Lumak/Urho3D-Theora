@@ -23,6 +23,7 @@
 # Define target name
 set (TARGET_NAME 83_Theora)
 
+include_directories (${CMAKE_BINARY_DIR}/${DEST_INCLUDE_DIR}/ThirdParty/libogg)
 set(LIBS ${LIBS} libogg libtheora libvorbis) 
 
 # Define source files

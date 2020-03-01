@@ -68,7 +68,7 @@ set(USIZE64 uint64_t)
 
 include(CheckSizes)
 
-#configure_file(include/ogg/config_types.h.in include/ogg/config_types.h @ONLY)
+configure_file(include/ogg/config_types.h.in ${CMAKE_CURRENT_BINARY_DIR}/include/ogg/config_types.h)
 
 set(OGG_HEADERS
     ${CMAKE_CURRENT_BINARY_DIR}/include/ogg/config_types.h
@@ -124,11 +124,12 @@ file (GLOB CPP_FILES ${OGG_SOURCES} )
 file (GLOB H_FILES ${OGG_HEADERS} )
 
 set (SOURCE_FILES ${CPP_FILES} ${H_FILES})
-set (INCLUDE_DIRS include)
+set (INCLUDE_DIRS include ${CMAKE_BINARY_DIR}/${DEST_INCLUDE_DIR}/ThirdParty/libogg )
 
 # Setup target
 setup_library ()
 
 # Install headers for building and using the Urho3D library
-install_header_files (DIRECTORY include/ogg DESTINATION ${DEST_INCLUDE_DIR}/ThirdParty FILES_MATCHING PATTERN *.h BUILD_TREE_ONLY)
+install_header_files (DIRECTORY include/ogg/ DESTINATION ${DEST_INCLUDE_DIR}/ThirdParty/libogg/ogg FILES_MATCHING PATTERN *.h USE_FILE_SYMLINK BUILD_TREE_ONLY)
+install_header_files (FILES ${CMAKE_CURRENT_BINARY_DIR}/include/ogg/config_types.h DESTINATION ${DEST_INCLUDE_DIR}/ThirdParty/libogg/ogg BUILD_TREE_ONLY)
 

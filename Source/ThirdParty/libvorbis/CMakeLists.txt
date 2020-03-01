@@ -109,7 +109,7 @@ file (GLOB CPP_FILES ${VORBIS_SOURCES} )
 file (GLOB H_FILES ${VORBIS_HEADERS} )
 
 set (SOURCE_FILES ${CPP_FILES} ${H_FILES})
-set (INCLUDE_DIRS include ../libogg/include)
+set (INCLUDE_DIRS include lib ${CMAKE_BINARY_DIR}/${DEST_INCLUDE_DIR}/ThirdParty/libogg)
 
 # Setup target
 setup_library ()

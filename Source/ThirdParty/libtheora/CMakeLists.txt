@@ -26,7 +26,7 @@ set(Encoder_SRCS
   lib/tokenize.c
 )
 
-if( WIN32 )
+if( MSVC )
   set(EncoderPlatform_SRCS
     lib/x86_vc/mmxencfrag.c
     lib/x86_vc/mmxfdct.c
@@ -64,7 +64,7 @@ set(Decoder_SRCS
   lib/state.c         
 )
 
-if( WIN32 )
+if( MSVC )
   set(DecoderPlatform_SRCS
     lib/x86_vc/mmxidct.c
     lib/x86_vc/mmxfrag.c
@@ -91,7 +91,7 @@ file (GLOB CPP_FILES ${Encoder_SRCS} ${EncoderPlatform_SRCS} ${Decoder_SRCS} ${D
 file (GLOB H_FILES include/theora/*.h)
 
 set (SOURCE_FILES ${CPP_FILES} ${H_FILES})
-set (INCLUDE_DIRS include ../libogg/include)
+set (INCLUDE_DIRS include ${CMAKE_BINARY_DIR}/${DEST_INCLUDE_DIR}/ThirdParty/libogg)
 
 # These are used to create visual studio folders.
 source_group(Encoder FILES ${Encoder_SRCS} ${EncoderPlatform_SRCS} )
