@@ -20,8 +20,9 @@
 static const int SyncBufferSize = 4096;
 static const int RGBAComponentSize = 4;
 
-#define MAX_AUDIO_TIME_OFFSET   10
-#define MAX_CORRECTIVE_LOOPS    2
+#define MAX_AUDIO_TIME_OFFSET   10LL
+#define NEG_AUDIO_TIME_OFFSET   -5LL
+#define AUDIO_PACKET_UNINIT     -1000LL
 
 //=============================================================================
 //=============================================================================
@@ -466,12 +467,14 @@ void Theora::UpdateTheora(float timeStep)
               theoraAudio_->Play();
           }
       }
+      #ifdef DBG_TIMERS
+      char buff[256];
+      #endif
 
       /* are we at or past time for this video frame? */
       if (stateFlag_ && videobufReady_ && videobufTime_ <= GetTime())
       {
           #ifdef DBG_TIMERS
-          char buff[256];
           sprintf(buff, "aud=%I64d, vid=%I64d, e=%I64d", audioTime_, videobufTime_, GetElapsedTime());
           URHO3D_LOGINFOF("%s", buff);
           #endif
@@ -490,12 +493,13 @@ void Theora::UpdateTheora(float timeStep)
       // note: audioTime_ will remain negative (-1000) until vorbis actually acquires a vorbis packet
       audioOffset = audioTime_ - elapsedTime_;
 
-      if (audioOffset < 0)
+      if (audioTime_ != AUDIO_PACKET_UNINIT && audioOffset < NEG_AUDIO_TIME_OFFSET)
       {
-          if (++numLoops > MAX_CORRECTIVE_LOOPS)
-          {
-              break;
-          }
+          #ifdef DBG_TIMERS
+          sprintf(buff, "audio offset=%I64d, loops=%d", audioOffset, numLoops);
+          URHO3D_LOGINFOF(buff);
+          ++numLoops;
+          #endif
       }
       else
       {
