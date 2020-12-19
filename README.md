@@ -15,7 +15,7 @@ Description
  * added sound
  * changed to run on a threaded process
 
- Added a sira-numb.ogv of incredibly talented drummer named Sina, you can find her page here, https://www.youtube.com/user/sinadrumming
+ Added a sira-numb.ogv video of an incredibly talented drummer named Sina, you can find her page here, https://www.youtube.com/user/sinadrumming
 
 Screenshot
 ----
