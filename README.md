@@ -17,8 +17,9 @@ Description
 
  Added a sira-numb.ogv video of an incredibly talented drummer named Sina, you can find her page here, https://www.youtube.com/user/sinadrumming
 
-Screenshot
+Screenshots
 ----
+![alt tag](https://github.com/Lumak/Urho3D-Theora/blob/master/screenshot/sina.png)
 ![alt tag](https://github.com/Lumak/Urho3D-Theora/blob/master/screenshot/screenshot.png)
 
 
