@@ -93,7 +93,7 @@
 		<attribute name="Is Enabled" value="true" />
 		<attribute name="Name" value="TV" />
 		<attribute name="Tags" />
-		<attribute name="Position" value="0 0.803689 -0.0847304" />
+		<attribute name="Position" value="0 1.103689 -0.0847304" />
 		<attribute name="Rotation" value="0.707107 -0.707107 0 0" />
 		<attribute name="Scale" value="3 3 3" />
 		<attribute name="Variables" />
