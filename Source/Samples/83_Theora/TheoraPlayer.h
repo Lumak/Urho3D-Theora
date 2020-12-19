@@ -23,6 +23,7 @@
 #pragma once
 
 #include "Sample.h"
+#include "TheoraData.h"
 
 //=============================================================================
 //=============================================================================
@@ -30,9 +31,13 @@ namespace Urho3D
 {
 class Node;
 class Scene;
+class StaticModel;
+class Material;
+class Texture2D;
 }
 
 class Theora;
+class TheoraAudio;
 
 //=============================================================================
 //=============================================================================
@@ -48,18 +53,44 @@ public:
     virtual void Start();
 
 private:
-    /// Construct the scene content.
     void CreateScene();
+    void InitializeTheora();
+    void AddElapsedTime(float timeStep);
+    void ProcessAudioVideo();
+    void Play();
+    void Pause();
+    void Stop();
+
+    bool SetOutputModel(StaticModel *model);
+    void ScaleModelAccordingVideoRatio();
+    void InitAudio();
+    bool InitTexture();
     /// Construct an instruction text to the UI.
     void CreateInstructions();
-    /// Read input and moves the camera.
-    void MoveCamera(float timeStep);
     /// Subscribe to application-wide logic update events.
     void SubscribeToEvents();
     /// Handle the logic update event.
     void HandleUpdate(StringHash eventType, VariantMap& eventData);
+    /// Read input and moves the camera.
+    void MoveCamera(float timeStep);
 
 private:
-	SharedPtr<Theora> tvc_;
+    SharedPtr<Theora> theora_;
+    Vector<SharedPtr<VideoData>> videoBufferContainer_;
+    Vector<SharedPtr<AudioData>> audioBufferContainer_;
+    SharedPtr<StaticModel> outputModel_;
+    SharedPtr<Material> outputMaterial_;
+    SharedArrayPtr<unsigned char> framePlanarDataRGBA_;
+    SharedPtr<Texture2D> rgbaTexture_;
 
+    SharedPtr<TheoraAudio> theoraAudio_;
+    TheoraAVInfo theoraAVInfo_;
+    WeakPtr<Node> tvNode_;
+    bool rescaleNode_;
+
+    float elapsedTime_;
+    int64_t elapsedTime64_;
+    bool stopped_;
+    bool paused_;
+    Timer inputTimer_;
 };

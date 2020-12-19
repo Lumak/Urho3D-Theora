@@ -12,28 +12,28 @@
 #include <stdio.h>
 
 #include "Theora.h"
-#include "TheoraAudio.h"
 
 #include <Urho3D/DebugNew.h>
 //=============================================================================
 //=============================================================================
 static const int SyncBufferSize = 4096;
-static const int RGBAComponentSize = 4;
+static const float VideoAdvanceFrames = 10.0f;
+static const float AudioAdvanceFrames = VideoAdvanceFrames + 1.0f;
+const int RGBAComponentSize = 4;
 
-#define MAX_AUDIO_TIME_OFFSET   10LL
-#define NEG_AUDIO_TIME_OFFSET   -5LL
-#define AUDIO_PACKET_UNINIT     -1000LL
+#define MAX_AUDIO_TIME_OFFSET   10
+#define MAX_CORRECTIVE_LOOPS    2
 
 //=============================================================================
 //=============================================================================
-Theora::Theora(Context* context)
-    : Component(context)
-    , isFileOpened_(false)
-    , isStopped_(false)
-    , frameWidth_(0)
-    , frameHeight_(0)
+Theora::Theora()
+    : elapsedTime_(0)
+    , fnExited_(false)
+    , threadEnabled_(true)
     , file_(0)
-    , outputMaterial_(0)
+    , videoAdvanceTime_(0)
+    , audioAdvanceTime_(0)
+    , stopAV_(false)
 
     , thDecCtx_(NULL)
     , thSetupInfo_(NULL)
@@ -49,11 +49,7 @@ Theora::Theora(Context* context)
     , audiobufFill_(0)
     , audiobufReady_(0)
     , audiobufGranulePos_(0)
-
-    , audioFdTotalSize_(-1)
     , audioFdFragSize_(0)
-
-    , audioFdTimerCalibrate_(-1)
     , audioTime_(0)
 
     , postProcessLevelMax_(0)
@@ -62,15 +58,20 @@ Theora::Theora(Context* context)
 
     , frames_(0)
     , dropped_(0)
-
-    , updateTime_(0)
+    , audioFills_(0)
 {
-    SubscribeToEvent(E_SCENEPOSTUPDATE, URHO3D_HANDLER(Theora, HandleUpdate));
 }
 
 Theora::~Theora()
 {
-    //audio_close();
+    // force exit thread fn
+    WaitExit();
+
+    if (thSetupInfo_)
+    {
+        th_setup_free(thSetupInfo_);
+        thSetupInfo_ = NULL;
+    }
 
     if (vbPacket_)
     {
@@ -88,28 +89,102 @@ Theora::~Theora()
       th_comment_clear(&thComment_);
       th_info_clear(&thInfo_);
     }
+
     ogg_sync_clear(&oggSyncState_);
 }
 
-void Theora::RegisterObject(Context* context)
+int Theora::Initialize(Context *context, const String& filename)
 {
-    context->RegisterFactory<Theora>();
-    //context->RegisterFactory<TheoraAudio>();
-}
+    int result = 0;
+    context_ = context;
 
-bool Theora::OpenFileName(const String& name)
-{
-    isFileOpened_ = false;
-
-    if (OpenFile(name))
+    if (OpenFile(filename))
     {
-        if (InitTheora() == INIT_OK)
-        {
-            isFileOpened_ = true;
-        }
+      result = InitTheora();
+    }
+    else
+    {
+      result = FILE_ERROR;
     }
 
-    return isFileOpened_;
+    return result;
+}
+
+bool Theora::StartProcess()
+{
+    bool result = false;
+
+    if (theoraAVInfo_.initialized_)
+    {
+        result = Thread::Run();
+    }
+
+    return result;
+}
+
+bool Theora::Run()
+{
+	return false;
+}
+
+void Theora::SetElapsedTime(float elapsedTime)
+{
+    MutexLock lock(mutexTimer_);
+    elapsedTime_ = static_cast<int64_t>(elapsedTime * 1000.0f);
+}
+
+int64_t Theora::GetElapsedTime()
+{
+    MutexLock lock(mutexTimer_);
+    return elapsedTime_;
+}
+
+void Theora::UpdateTimer()
+{
+  int64_t elapsedTime = GetElapsedTime();
+  videoAdvanceTime_ = elapsedTime + static_cast<int64_t>(1000.0f * VideoAdvanceFrames/theoraAVInfo_.videoFrameRate_);
+  audioAdvanceTime_ = elapsedTime + static_cast<int64_t>(1000.0f * AudioAdvanceFrames/theoraAVInfo_.videoFrameRate_);
+}
+
+const TheoraAVInfo& Theora::GetTheoraAVInfo() const
+{
+    return theoraAVInfo_;
+}
+
+void Theora::StoreVideoQueueData(SharedPtr<VideoData> theoraData)
+{
+    MutexLock lock(mutexVideoBuff_);
+    videoBufferContainer_.Push(theoraData);
+}
+
+SharedPtr<VideoData> Theora::GetVideoQueueData()
+{
+    MutexLock lock(mutexVideoBuff_);
+    SharedPtr<VideoData> ptr(0);
+    if (videoBufferContainer_.Size() > 0)
+    {
+        ptr = videoBufferContainer_[0];
+        videoBufferContainer_.Erase(0);
+    }
+    return ptr;
+}
+
+void Theora::StoreAudioQueueData(SharedPtr<AudioData> theoraData)
+{
+    MutexLock lock(mutexAudioBuff_);
+    audioBufferContainer_.Push(theoraData);
+}
+
+SharedPtr<AudioData> Theora::GetAudioQueueData()
+{
+    MutexLock lock(mutexAudioBuff_);
+    SharedPtr<AudioData> ptr(0);
+    if (audioBufferContainer_.Size() > 0)
+    {
+        ptr = audioBufferContainer_[0];
+        audioBufferContainer_.Erase(0);
+    }
+    return ptr;
 }
 
 int Theora::InitTheora()
@@ -231,8 +306,6 @@ int Theora::InitTheora()
       }
     }
 
-
-
     /* and now we have it all.  initialize decoders */
     if (thPacket_)
     {
@@ -247,11 +320,22 @@ int Theora::InitTheora()
       th_decode_ctl(thDecCtx_, TH_DECCTL_SET_PPLEVEL, &postProcessLevel_, sizeof(postProcessLevel_));
       postProcessIncrement_ = 0;
 
-      // init decoder
-      frameWidth_ = thInfo_.frame_width;
-      frameHeight_ = thInfo_.frame_height;
-      videoTimer_ = 0;
-      isStopped_ = false;
+      // error if the denom is near zero
+      if (thInfo_.fps_denominator < M_EPSILON)
+      {
+        return CODEC_FRAMERATE_ERROR;
+      }
+
+      // error if not the right video encoding
+      if (thInfo_.pixel_fmt != TH_PF_420)
+      {
+          return CODEC_YUV_ERROR;
+      }
+
+      // populate av info
+      theoraAVInfo_.videoFrameWidth_ = thInfo_.frame_width;
+      theoraAVInfo_.videoFrameHeight_ = thInfo_.frame_height;
+      theoraAVInfo_.videoFrameRate_ = (float)thInfo_.fps_numerator/(float)thInfo_.fps_denominator;
     }
     else
     {
@@ -259,9 +343,6 @@ int Theora::InitTheora()
       th_info_clear(&thInfo_);
       th_comment_clear(&thComment_);
     }
-
-    th_setup_free(thSetupInfo_);
-    thSetupInfo_ = NULL;
 
     if (vbPacket_)
     {
@@ -277,322 +358,251 @@ int Theora::InitTheora()
       vorbis_info_clear(&vbInfo_);
       vorbis_comment_clear(&vbComment_);
     }
-    elapsedTime_ = 0;
 
-    /* open audio */
     if (vbPacket_)
     {
-        //open_audio();
-        audioFdFragSize_ = (vbDspState_.pcm_storage/2);
-        // approximate total size
-        audioFdTotalSize_ = audioFdFragSize_ * 2;
-        audiobuf_ = new ogg_int16_t[audioFdTotalSize_];
+        audioFdFragSize_ = vbDspState_.pcm_storage * 2;
+        audiobuf_ = new int16_t[audioFdFragSize_];
+        audiobufFill_ = 0;
 
-        theoraAudio_ = new TheoraAudio(context_);
-        SoundSource *soundSource = node_->CreateComponent<SoundSource>();
-        const bool sixteenBits = true;
-        const bool stereo = vbInfo_.channels > 1?true:false;
-        theoraAudio_->Init(soundSource, vbInfo_.rate, sixteenBits, stereo);
+        theoraAVInfo_.audioFrequencey_ = vbInfo_.rate;
+        theoraAVInfo_.audioSixteenBits_ = true;
+        theoraAVInfo_.audioStereo_ = vbInfo_.channels > 1 ? true : false;
     }
 
-    /* open video */
-    if (thPacket_)
-    {
-        //open_video();
-    }
+    // set as initialized
+    theoraAVInfo_.initialized_ = true;
+    elapsedTime_ = 0;
 
     stateFlag_ = 0; /* playback has not begun */
+
+    videoAdvanceTime_ = static_cast<int64_t>(1000.0f * VideoAdvanceFrames/theoraAVInfo_.videoFrameRate_);
+    audioAdvanceTime_ = static_cast<int64_t>(1000.0f * AudioAdvanceFrames/theoraAVInfo_.videoFrameRate_);
+    UpdateFrames();
 
     return INIT_OK;
 }
 
-void Theora::UpdateTheora(float timeStep)
+void Theora::ThreadFunction()
 {
-    /* on to the main decode loop.  We assume in this example that audio
-       and video start roughly together, and don't begin playback until
-       we have a start frame for both.  This is not necessarily a valid
-       assumption in Ogg A/V streams! It will always be true of the
-       example_encoder (and most streams) though. */
+    unsigned sleepMS = static_cast<unsigned>(1000.0f / (theoraAVInfo_.videoFrameRate_ * 2.0f));
 
-    AddElapsedTime(timeStep);
-    int numLoops = 0;
-
-    // time correction
-    ogg_int64_t audioOffset = audioTime_ - elapsedTime_;
-
-    if (audioOffset > MAX_AUDIO_TIME_OFFSET)
+    while (true)
     {
-        return;
+        UpdateTimer();
+
+        if (videobufTime_ < videoAdvanceTime_ || audioTime_ < audioAdvanceTime_)
+        {
+            UpdateFrames();
+        }
+
+        if (!GetThreadEnabled())
+        {
+            break;
+        }
+
+        Time::Sleep(sleepMS);
     }
 
-    // process stream
-    while (!FileEof())
-    {
-      /* we want a video and audio frame ready to go at all times.  If
-         we have to buffer incoming, buffer the compressed data (ie, let
-         ogg do the buffering) */
-      while (vbPacket_ && !audiobufReady_)
-      {
-        int ret;
-        float **pcm;
+    SetFnExit(true);
+}
 
-        /* if there's pending, decoded audio, grab it */
-        if ((ret = vorbis_synthesis_pcmout(&vbDspState_, &pcm)) > 0)
+void Theora::UpdateFrames()
+{
+    int processOggPackets = 0;
+
+    // see the note about this at the bottom of this loop
+	while (processOggPackets < 2)
+	{
+		/* we want a video and audio frame ready to go at all times.  If
+		   we have to buffer incoming, buffer the compressed data (ie, let
+		   ogg do the buffering) */
+		while (vbPacket_ && !audiobufReady_)
+		{
+			int ret;
+			float **pcm;
+
+			/* if there's pending, decoded audio, grab it */
+			if ((ret = vorbis_synthesis_pcmout(&vbDspState_, &pcm)) > 0)
+			{
+                int countIdx = audiobufFill_/2;
+                int maxsamples = (audioFdFragSize_ - audiobufFill_)/2/vbInfo_.channels;
+                int i;
+                for (i = 0; i < ret && i < maxsamples; ++i)
+                {
+                    for (int j = 0; j < vbInfo_.channels; ++j)
+                    {
+                        audiobuf_[countIdx++] = Clamp(FloorToInt(pcm[j][i] * 32767.0f), -32768, 32767);
+                    }
+                }
+
+                vorbis_synthesis_read(&vbDspState_, i);
+                audiobufFill_ += i * vbInfo_.channels * 2;
+                ++audioFills_;
+
+				if (vbDspState_.granulepos >= 0)
+				{
+					audiobufGranulePos_ = (long)vbDspState_.granulepos - ret + i;
+				}
+				else
+				{
+					audiobufGranulePos_ += i;
+				}
+
+                audioTime_ = static_cast<int64_t>(1000.0 * vorbis_granule_time(&vbDspState_, audiobufGranulePos_));
+
+                if (audiobufFill_ == audioFdFragSize_)
+                {
+                    audiobufReady_ = 1;
+
+                    // buffer audio
+                    SharedPtr<AudioData> audioData(new AudioData());
+                    audioData->time_ = audioTime_;
+                    audioData->size_ = audiobufFill_;
+                    audioData->buf_ = new int16_t[audiobufFill_];
+                    memcpy(audioData->buf_.Get(), audiobuf_, audiobufFill_ * sizeof(int16_t));
+
+                    StoreAudioQueueData(audioData);
+
+                    // clear buffer idx position
+                    audiobufFill_ = 0;
+                }
+			}
+			else
+			{
+				/* no pending audio; is there a pending packet to decode? */
+				if (ogg_stream_packetout(&oggVbStreamState_, &oggPacket_) > 0)
+				{
+					if (vorbis_synthesis(&vbBlock_, &oggPacket_) == 0) /* test for success! */
+					{
+						vorbis_synthesis_blockin(&vbDspState_, &vbBlock_);
+					}
+				}
+				else   /* we need more data; break out to suck in another page */
+				{
+					break;
+				}
+			}
+		}
+
+        while (thPacket_ && !videobufReady_)
         {
-          int countIdx = audiobufFill_/2;
-          int maxsamples = (audioFdFragSize_ - audiobufFill_)/2/vbInfo_.channels;
-          int i;
-          for (i = 0; i < ret && i < maxsamples; ++i)
+          /* theora is one in, one out... */
+          if (ogg_stream_packetout(&oggThStreamState_, &oggPacket_) > 0)
           {
-              for (int j = 0; j < vbInfo_.channels; ++j)
-              {
-                  audiobuf_[countIdx++] = Clamp(FloorToInt(pcm[j][i] * 32767.0f), -32768, 32767);
-              }
-          }
-
-          vorbis_synthesis_read(&vbDspState_, i);
-          audiobufFill_ += i * vbInfo_.channels * 2;
-
-          if (audiobufFill_ == audioFdFragSize_)
-          {
-              audiobufReady_ = 1;
-          }
-
-          if (vbDspState_.granulepos >= 0)
-          {
-            audiobufGranulePos_ = (long)vbDspState_.granulepos - ret + i;
-          }
-          else
-          {
-            audiobufGranulePos_ += i;
-          }
-        }
-        else
-        {
-          /* no pending audio; is there a pending packet to decode? */
-          if (ogg_stream_packetout(&oggVbStreamState_, &oggPacket_) > 0)
-          {
-            if (vorbis_synthesis(&vbBlock_, &oggPacket_) == 0) /* test for success! */
+            if (postProcessIncrement_)
             {
-              vorbis_synthesis_blockin(&vbDspState_, &vbBlock_);
-              audioTime_ = (ogg_int64_t)(1000.0 * vorbis_granule_time(&vbDspState_, vbDspState_.granulepos));
+              postProcessLevel_ += postProcessIncrement_;
+              th_decode_ctl(thDecCtx_, TH_DECCTL_SET_PPLEVEL, &postProcessLevel_, sizeof(postProcessLevel_));
+              postProcessIncrement_ = 0;
+            }
+
+            if (oggPacket_.granulepos >= 0)
+            {
+              th_decode_ctl(thDecCtx_, TH_DECCTL_SET_GRANPOS, &oggPacket_.granulepos, sizeof(oggPacket_.granulepos));
+            }
+
+            if (th_decode_packetin(thDecCtx_, &oggPacket_, &videobufGranulePos_) == 0)
+            {
+              videobufTime_ = static_cast<int64_t>(1000.0 * th_granule_time(thDecCtx_, videobufGranulePos_));
+              frames_++;
+
+              // write buffer
+			  videobufReady_ = 1;
+              VideoWrite();
             }
           }
-          else   /* we need more data; break out to suck in another page */
+          else
           {
             break;
           }
         }
-      }
 
-      while (thPacket_ && !videobufReady_)
-      {
-        /* theora is one in, one out... */
-        if (ogg_stream_packetout(&oggThStreamState_, &oggPacket_) > 0)
+        if (videobufTime_ > videoAdvanceTime_ && audioTime_ > audioAdvanceTime_)
         {
-          if (postProcessIncrement_)
-          {
-            postProcessLevel_ += postProcessIncrement_;
-            th_decode_ctl(thDecCtx_, TH_DECCTL_SET_PPLEVEL, &postProcessLevel_, sizeof(postProcessLevel_));
-            postProcessIncrement_ = 0;
-          }
-          /*HACK: This should be set after a seek or a gap, but we might not have
-             a granulepos for the first packet (we only have them for the last
-             packet on a page), so we just set it as often as we get it.
-            To do this right, we should back-track from the last packet on the
-             page and compute the correct granulepos for the first packet after
-             a seek or a gap.*/
-          if (oggPacket_.granulepos >= 0)
-          {
-            th_decode_ctl(thDecCtx_, TH_DECCTL_SET_GRANPOS, &oggPacket_.granulepos, sizeof(oggPacket_.granulepos));
-          }
-
-          if (th_decode_packetin(thDecCtx_, &oggPacket_, &videobufGranulePos_) == 0)
-          {
-            videobufTime_ = (ogg_int64_t)(1000.0 * th_granule_time(thDecCtx_, videobufGranulePos_));
-            frames_++;
-
-            /* is it already too old to be useful?  This is only actually
-               useful cosmetically after a SIGSTOP.  Note that we have to
-               decode the frame even if we don't show it (for now) due to
-               keyframing.  Soon enough libtheora will be able to deal
-               with non-keyframe seeks.  */
-            if (videobufTime_ >= GetTime())
-            {
-              videobufReady_ = 1;
-            }
-            else
-            {
-              /*If we are too slow, reduce the pp level.*/
-              postProcessIncrement_ = postProcessLevel_ > 0 ? -1 : 0;
-              dropped_++;
-            }
-          }
+            break;
         }
-        else
+
+		if (!videobufReady_ || !audiobufReady_)
+		{
+			/* no data yet for somebody.  Grab another page */
+            BufferData();
+
+			while (ogg_sync_pageout(&oggSyncState_, &oggPage_) > 0)
+			{
+				QueuePage(&oggPage_);
+			}
+		}
+
+		// post clear (to prevent continuous buffer fetching above)
+        if (audiobufReady_)
         {
-          break;
+            audiobufReady_ = 0;
         }
-      }
-
-      if (!videobufReady_ && !audiobufReady_ && FileEof())
-      {
-          break;
-      }
-
-      if (!videobufReady_ || !audiobufReady_)
-      {
-        /* no data yet for somebody.  Grab another page */
-        BufferData();
-
-        while (ogg_sync_pageout(&oggSyncState_, &oggPage_) > 0)
+        if (videobufReady_)
         {
-          QueuePage(&oggPage_);
+            videobufReady_ = 0;
         }
-      }
 
-      /* if our buffers either don't exist or are ready to go,
-         we can begin playback */
-      if ((!thPacket_ || videobufReady_) && (!vbPacket_ || audiobufReady_))
-      {
-          stateFlag_ = 1;
-      }
-
-      /* If playback has begun, top audio buffer off immediately. */
-      if (stateFlag_)
-      {
-          AudioWrite();
-          if (!theoraAudio_->IsPlaying())
-          {
-              theoraAudio_->Play();
-          }
-      }
-      #ifdef DBG_TIMERS
-      char buff[256];
-      #endif
-
-      /* are we at or past time for this video frame? */
-      if (stateFlag_ && videobufReady_ && videobufTime_ <= GetTime())
-      {
-          #ifdef DBG_TIMERS
-          sprintf(buff, "aud=%I64d, vid=%I64d, e=%I64d", audioTime_, videobufTime_, GetElapsedTime());
-          URHO3D_LOGINFOF("%s", buff);
-          #endif
-
-          VideoWrite();
-          videobufReady_ = 0;
-      }
-
-      /* same if we've run out of input */
-      if (FileEof())
-      {
-          break;
-      }
-
-      // correction loops
-      // note: audioTime_ will remain negative (-1000) until vorbis actually acquires a vorbis packet
-      audioOffset = audioTime_ - elapsedTime_;
-
-      if (audioTime_ != AUDIO_PACKET_UNINIT && audioOffset < NEG_AUDIO_TIME_OFFSET)
-      {
-          #ifdef DBG_TIMERS
-          sprintf(buff, "audio offset=%I64d, loops=%d", audioOffset, numLoops);
-          URHO3D_LOGINFOF(buff);
-          ++numLoops;
-          #endif
-      }
-      else
-      {
-          break;
-      }
-    }
+        // even when at EoF, there are still data already buffered in the 
+        // ogg stream states, and we want to allow that to get processed at
+        // least one cycle per call into this routine.
+        if (FileEof())
+        {
+            ++processOggPackets;
+        }
+	}
 }
 
-bool Theora::SetOutputModel(StaticModel* sm)
+void Theora::WaitExit()
 {
-    bool ret = false;
+    SetThreadEnable(false);
 
-    if (sm)
-    {
-        // Set model surface
-        outputModel_ = sm;
-        outputMaterial_ = sm->GetMaterial(0);
-
-        // Create textures & images
-        ScaleModelAccordingVideoRatio();
-        InitTexture();
-        ret = true;
+    do 
+    { 
+        Time::Sleep(1); 
     }
-
-    return ret;
+    while (!GetFnExited());
 }
 
-void Theora::Play()
+void Theora::SetThreadEnable(bool enable)
 {
-    isStopped_ = false;
-    if (theoraAudio_)
-    {
-        theoraAudio_->Play();
-    }
+    MutexLock lock(mutexThreadEnable_);
+    threadEnabled_ = enable;
 }
 
-void Theora::Pause() 
+bool Theora::GetThreadEnabled()
 {
-    isStopped_ = true;
-    if (theoraAudio_)
-    {
-        theoraAudio_->Stop();
-    }
+    MutexLock lock(mutexThreadEnable_);
+    return threadEnabled_;
 }
 
-void Theora::Loop(bool isLoop)
+void Theora::SetFnExit(bool bset)
 {
-
+    MutexLock lock(mutexExit_);
+    fnExited_ = bset;
 }
 
-void Theora::Stop()
+bool Theora::GetFnExited()
 {
-    isStopped_ = true;
-    file_->Seek(0);
-
-    videoTimer_ = 0;
-    videobufTime_ = 0;
-    elapsedTime_ = 0;
-    stateFlag_ = 0;
-    updateTime_ = 0;
-
-    audioTime_ = 0;
-    audioFdTimerCalibrate_ = -1;
-    audiobufGranulePos_ = 0;
-    audiobufFill_ = 0;
-    videobufReady_ = 0;
-    audiobufReady_ = 0;
-
-    if (theoraAudio_)
-    {
-        theoraAudio_->Stop();
-        theoraAudio_->Clear();
-    }
-
-    ogg_stream_reset(&oggVbStreamState_);
-    ogg_stream_reset(&oggThStreamState_);
-}
-
-void Theora::HandleUpdate(StringHash eventType, VariantMap& eventData)
-{
-    using namespace Update;
-    float timeStep = eventData[P_TIMESTEP].GetFloat();
-
-    if (!isStopped_)
-    {
-        UpdateTheora(timeStep);
-    }
+    MutexLock lock(mutexExit_);
+    return fnExited_;
 }
 
 bool Theora::OpenFile(const String& fileName)
 {
     file_ = new File(context_, fileName, FILE_READ);
     return (file_ != 0 && file_->IsOpen());
+}
+
+bool Theora::FileEof() const
+{
+    if (!file_ || !file_->IsOpen())
+    {
+      return true;
+    }
+
+    return file_->IsEof();
 }
 
 int Theora::BufferData()
@@ -615,46 +625,46 @@ int Theora::BufferData()
     return bytes;
 }
 
-bool Theora::FileEof() const
+int Theora::QueuePage(ogg_page *page)
 {
-    if (!file_ || !file_->IsOpen())
-    {
-      return true;
-    }
-
-    return file_->IsEof();
+  if (thPacket_)
+  {
+      ogg_stream_pagein(&oggThStreamState_, page);
+  }
+  if (vbPacket_)
+  {
+      ogg_stream_pagein(&oggVbStreamState_, page);
+  }
+  return 0;
 }
 
-bool Theora::InitTexture()
+void Theora::VideoWrite()
 {
-    bool success = false;
+    th_ycbcr_buffer yuv;
+    th_decode_ycbcr_out(thDecCtx_, yuv);
 
-    // RGBA texture
-    if (outputMaterial_)
-    {
-      framePlanarDataRGBA_ = new unsigned char[frameWidth_ * frameHeight_ * RGBAComponentSize];
-      rgbaTexture_ = SharedPtr<Texture2D>(new Texture2D(context_));
-      rgbaTexture_->SetSize(frameWidth_, frameHeight_, Graphics::GetRGBAFormat(), TEXTURE_DYNAMIC);
-      rgbaTexture_->SetFilterMode(FILTER_BILINEAR);
-      rgbaTexture_->SetNumLevels(1);
+    SharedPtr<VideoData> ptr(new VideoData());
+    ptr->size_ = theoraAVInfo_.videoFrameWidth_ * theoraAVInfo_.videoFrameHeight_ * RGBAComponentSize;
+    ptr->buf_ = new unsigned char[ptr->size_];
+    ptr->time_ = videobufTime_;
 
-      outputMaterial_->SetTexture(TextureUnit::TU_DIFFUSE, rgbaTexture_);
-      success = true;
-    }
+    // convert
+    Yuv420pToRgba8888(yuv, ptr);
 
-    return success;
+    // queue buffer
+    StoreVideoQueueData(ptr);
 }
 
 //=============================================================================
 // Function ref - below function is a modified version of nativeYuv420pToRgba8888
 // function found in Android Open Source Project (AOSP), APACHE LICENSE 2.0
 //=============================================================================
-void Theora::Yuv420pToRgba8888(const th_ycbcr_buffer &yuv) 
+void Theora::Yuv420pToRgba8888(const th_ycbcr_buffer &yuv, SharedPtr<VideoData> ptr) 
 {
     uint8* pInY = yuv[0].data;
     uint8* pInU = yuv[1].data;
     uint8* pInV = yuv[2].data;
-    Rgba* pOutColor = (Rgba*)framePlanarDataRGBA_.Get();
+    Rgba* pOutColor = (Rgba*)ptr->buf_.Get();
     int width = yuv[1].width;
     int height = yuv[1].height;
 
@@ -690,116 +700,6 @@ void Theora::Yuv420pToRgba8888(const th_ycbcr_buffer &yuv)
     }
 }
 
-void Theora::ScaleModelAccordingVideoRatio()
-{
-    if (outputModel_)
-    {
-        Node* node = outputModel_->GetNode();
-        float ratioW = (float)frameWidth_ / (float)frameHeight_;
-        float ratioH = (float)frameHeight_ / (float)frameWidth_;
-
-        Vector3 originalScale = node->GetScale();
-        node->SetScale(Vector3(originalScale.x_, originalScale.x_ * ratioH, originalScale.z_ * ratioH));
-    }
-}
-
-int Theora::QueuePage(ogg_page *page)
-{
-  if (thPacket_)
-  {
-      ogg_stream_pagein(&oggThStreamState_, page);
-  }
-  if (vbPacket_)
-  {
-      ogg_stream_pagein(&oggVbStreamState_, page);
-  }
-  return 0;
-}
-
-void Theora::AddElapsedTime(float timeStep)
-{
-    videoTimer_ += timeStep;
-    elapsedTime_ = (ogg_int64_t)(videoTimer_ * 1000.0f);
-}
-
-ogg_int64_t Theora::GetElapsedTime()
-{
-    return elapsedTime_;
-}
-
-/* write a fragment to the OSS kernel audio API, but only if we can
-   stuff in a whole fragment without blocking */
-void Theora::AudioWrite()
-{
-  if (audiobufReady_)
-  {
-    long bytes = audiobufFill_;
-
-    if (bytes >= audioFdFragSize_)
-    {
-      if (bytes == audioFdFragSize_)
-      {
-          AudioCalibrateTimer(1);
-      }
-
-      theoraAudio_->WriteData(audiobuf_.Get(), audiobufFill_);
-
-      audiobufFill_ = 0;
-      audiobufReady_ = 0;
-    }
-  }
-}
-
-ogg_int64_t Theora::GetTime()
-{
-  ogg_int64_t now = GetElapsedTime();
-
-  if (audioFdTimerCalibrate_ == -1)
-  {
-      audioFdTimerCalibrate_ = now;
-  }
-
-  return (now - audioFdTimerCalibrate_);
-}
-
-/* call this only immediately after unblocking from a full kernel
-   having a newly empty fragment or at the point of DMA restart */
-void Theora::AudioCalibrateTimer(int restart)
-{
-  ogg_int64_t current_sample;
-  ogg_int64_t new_time = GetElapsedTime();
-
-  if (restart)
-  {
-    current_sample = audiobufGranulePos_ - audiobufFill_/2/vbInfo_.channels;
-  }
-  else
-  {
-    current_sample = audiobufGranulePos_ - (audiobufFill_ + audioFdTotalSize_ - audioFdFragSize_)/2/vbInfo_.channels;
-  }
-
-  new_time -= 1000 * current_sample / vbInfo_.rate;
-
-  if (new_time < 0)
-  {
-      new_time = 0;
-  }
-
-  audioFdTimerCalibrate_ = new_time;
-}
-
-void Theora::VideoWrite()
-{
-    th_ycbcr_buffer yuv;
-
-    th_decode_ycbcr_out(thDecCtx_, yuv);
-    Yuv420pToRgba8888(yuv);
-
-    // update texture
-    rgbaTexture_->SetSize(yuv[0].width, yuv[0].height, Graphics::GetRGBAFormat(), TEXTURE_DYNAMIC);
-    rgbaTexture_->SetData(0, 0, 0, yuv[0].width, yuv[0].height, (const void*)framePlanarDataRGBA_);
-}
-
 void Theora::DumpInfo()
 {
     URHO3D_LOGINFOF("Ogg logical stream 0x%x is Theora %d x %d, fps=%f",
@@ -808,8 +708,8 @@ void Theora::DumpInfo()
     switch (thInfo_.pixel_fmt)
     {
     case TH_PF_420: URHO3D_LOGINFO(" 4:2:0 video"); break;
-    case TH_PF_422: URHO3D_LOGINFO(" 4:2:2 video"); break;
-    case TH_PF_444: URHO3D_LOGINFO(" 4:4:4 video"); break;
+    case TH_PF_422: URHO3D_LOGINFO(" 4:2:2 video - not supported"); break;
+    case TH_PF_444: URHO3D_LOGINFO(" 4:4:4 video - not supported"); break;
     case TH_PF_RSVD:
     default:
         URHO3D_LOGINFO(" video -- (UNKNOWN Chroma sampling!)");

@@ -1,80 +1,93 @@
 #pragma once
 
-#include <Urho3D/Scene/Component.h>
+#include <Urho3D/Core/Thread.h>
+#include <Urho3D/Container/RefCounted.h>
 
 #include <ogg/ogg.h>
 #include <theora/theora.h>
 #include <theora/theoradec.h>
 #include <vorbis/codec.h>
 
+#include "TheoraData.h"
+
 //=============================================================================
 //=============================================================================
+using namespace Urho3D;
 namespace Urho3D
 {
-class StaticModel;
-class Material;
-class Texture2D;
-class File;
+class Context;
 }
 
-using namespace Urho3D;
-
-class TheoraAudio;
-
 //=============================================================================
 //=============================================================================
-class URHO3D_API Theora : public Component
+class URHO3D_API Theora : public Thread, public RefCounted
 {
-    URHO3D_OBJECT(Theora, Component);
-
 public:
-    Theora(Context* context);
+    Theora();
     virtual ~Theora();
-    static void RegisterObject(Context* context);
 
-    bool OpenFileName(const String& name);
-    bool SetOutputModel(StaticModel* sm);
-    void Play();
-    void Pause();
-    void Loop(bool isLoop = true);
-    void Stop();
+    int Initialize(Context *context, const String& filename);
+    const TheoraAVInfo& GetTheoraAVInfo() const;
+
+    // control and buffer
+    bool StartProcess();
+    void SetElapsedTime(float timer);
+    SharedPtr<VideoData> GetVideoQueueData();
+    SharedPtr<AudioData> GetAudioQueueData();
 
 private:
-    void HandleUpdate(StringHash eventType, VariantMap& eventData);
-    bool OpenFile(const String& fileName);
-    void ScaleModelAccordingVideoRatio();
-    int BufferData();
-    bool FileEof() const;
-    void DecodeVideoFrame();
-    bool InitTexture();
-    void Yuv420pToRgba8888(const th_ycbcr_buffer &yuv);
-
     int InitTheora();
-    void DumpInfo();
-    void UpdateTheora(float timeStep);
-    int QueuePage(ogg_page *page);
-    void AddElapsedTime(float timeStep);
-    ogg_int64_t GetElapsedTime();
 
-    ogg_int64_t GetTime();
-    void AudioCalibrateTimer(int restart);
-    void AudioWrite();
+    // threaded background fn
+    virtual void ThreadFunction();
+    // override the thread Run() - not virtual but having the same name blocks access
+    bool Run();
+    int64_t GetElapsedTime();
+    void UpdateTimer();
+    void UpdateFrames();
+
+    // buffer container methods
+    void StoreVideoQueueData(SharedPtr<VideoData> theoraData);
+    void StoreAudioQueueData(SharedPtr<AudioData> theoraData);
+
+    void WaitExit();
+    void SetThreadEnable(bool enable);
+    bool GetThreadEnabled();
+    void SetFnExit(bool bset);
+    bool GetFnExited();
+
+    bool OpenFile(const String& fileName);
+    bool FileEof() const;
+    int BufferData();
+    int QueuePage(ogg_page *page);
     void VideoWrite();
+    void Yuv420pToRgba8888(const th_ycbcr_buffer &yuv, SharedPtr<VideoData> ptr);
+    void DumpInfo();
 
 private:
-    SharedPtr<StaticModel> outputModel_;
-    SharedPtr<Material> outputMaterial_;
-    SharedArrayPtr<unsigned char> framePlanarDataRGBA_;
-    SharedPtr<Texture2D> rgbaTexture_;
-
+    TheoraAVInfo        theoraAVInfo_;
+    WeakPtr<Context>    context_;
     SharedPtr<File>     file_;
-    bool                isFileOpened_;
-    bool                isStopped_;
-    unsigned            frameWidth_;
-    unsigned            frameHeight_;
-    float               videoTimer_;
 
-    // audio and video
+    int64_t             elapsedTime_;
+    int64_t             videoAdvanceTime_;
+    int64_t             audioAdvanceTime_;
+
+    // buffers
+    Vector<SharedPtr<VideoData>>  videoBufferContainer_;
+    Vector<SharedPtr<AudioData>>  audioBufferContainer_;
+
+    // threading properties
+    Mutex            mutexTimer_;
+    Mutex            mutexExit_;
+    Mutex            mutexAudioBuff_;
+    Mutex            mutexVideoBuff_;
+    Mutex            mutexThreadEnable_;
+    bool             threadEnabled_;
+    bool             fnExited_;
+    bool             stopAV_;
+
+    // theora audio and video
     ogg_sync_state   oggSyncState_;
     ogg_page         oggPage_;
     ogg_stream_state oggVbStreamState_;
@@ -96,45 +109,25 @@ private:
     int              vbPacket_;
     int              stateFlag_;
 
-    // single frame video buffering
     int              videobufReady_;
-    ogg_int64_t      videobufGranulePos_;
-    ogg_int64_t      videobufTime_;
+    int64_t          videobufGranulePos_;
+    int64_t          videobufTime_;
 
-    // single audio fragment audio buffering
+    // audio fragment audio buffering
+    int              audioFdFragSize_;
     int              audiobufFill_;
     int              audiobufReady_;
-    SharedArrayPtr<ogg_int16_t>      audiobuf_;
-
-    long             audioFdTotalSize_;
-    int              audioFdFragSize_;      /* read and write only complete fragments
-                                           so that SNDCTL_DSP_GETOSPACE is
-                                           accurate immediately after a bank
-                                           switch */
-
-    ogg_int64_t      audiobufGranulePos_; /* time position of last sample */
-    ogg_int64_t      audioFdTimerCalibrate_;
-    ogg_int64_t      elapsedTime_;
-    ogg_int64_t      updateTime_;
-    ogg_int64_t      audioTime_;
-
+    SharedArrayPtr<int16_t> audiobuf_;
+	int64_t          audiobufGranulePos_; /* time position of last sample */
+	int64_t          audioTime_;
 
     int              postProcessLevelMax_;
     int              postProcessLevel_;
     int              postProcessIncrement_;
 
+    int              audioFills_;
     int              frames_;
     int              dropped_;
-
-    SharedPtr<TheoraAudio> theoraAudio_;
-
-    enum InitErrorType
-    {
-        CODEC_HEADER_ERROR = -3,
-        VB_PACKET_ERROR = -2,
-        TH_PACKET_ERROR = -1,
-        INIT_OK = 0,
-    };
 
     //=============================================================================
     // Function ref - below functions are from 
