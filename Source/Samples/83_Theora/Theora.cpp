@@ -21,9 +21,6 @@ static const float VideoAdvanceFrames = 10.0f;
 static const float AudioAdvanceFrames = VideoAdvanceFrames + 1.0f;
 const int RGBAComponentSize = 4;
 
-#define MAX_AUDIO_TIME_OFFSET   10
-#define MAX_CORRECTIVE_LOOPS    2
-
 //=============================================================================
 //=============================================================================
 Theora::Theora()
@@ -364,6 +361,8 @@ int Theora::InitTheora()
         audioFdFragSize_ = vbDspState_.pcm_storage * 2;
         audiobuf_ = new int16_t[audioFdFragSize_];
         audiobufFill_ = 0;
+        int audioFillGranuleSize = audioFdFragSize_/2/vbInfo_.channels;
+        audioFillGranuleTime_ = static_cast<int64_t>(1000.0 * audioFillGranuleSize / vbInfo_.rate);
 
         theoraAVInfo_.audioFrequencey_ = vbInfo_.rate;
         theoraAVInfo_.audioSixteenBits_ = true;
@@ -457,7 +456,7 @@ void Theora::UpdateFrames()
 
                     // buffer audio
                     SharedPtr<AudioData> audioData(new AudioData());
-                    audioData->time_ = audioTime_;
+                    audioData->time_ = audioTime_ - audioFillGranuleTime_;
                     audioData->size_ = audiobufFill_;
                     audioData->buf_ = new int16_t[audiobufFill_];
                     memcpy(audioData->buf_.Get(), audiobuf_, audiobufFill_ * sizeof(int16_t));

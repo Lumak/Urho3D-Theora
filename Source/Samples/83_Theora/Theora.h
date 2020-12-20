@@ -120,6 +120,7 @@ private:
     SharedArrayPtr<int16_t> audiobuf_;
 	int64_t          audiobufGranulePos_; /* time position of last sample */
 	int64_t          audioTime_;
+    int64_t          audioFillGranuleTime_;
 
     int              postProcessLevelMax_;
     int              postProcessLevel_;

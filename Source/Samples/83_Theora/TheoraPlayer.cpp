@@ -245,7 +245,7 @@ void TheoraPlayer::ProcessAudioVideo()
     // write video
     while (videoBufferContainer_.Size() > 0)
     {
-        if (videoBufferContainer_[0]->time_ < elapsedTime64_)
+        if (videoBufferContainer_[0]->time_ <= elapsedTime64_)
         {
             rgbaTexture_->SetSize(theoraAVInfo_.videoFrameWidth_, theoraAVInfo_.videoFrameHeight_, 
                                   Graphics::GetRGBAFormat(), TEXTURE_DYNAMIC);
@@ -261,10 +261,9 @@ void TheoraPlayer::ProcessAudioVideo()
 
     // write audio
     bool gotAudioBuff = false;
-    int64_t advFrameTime = static_cast<int64_t>(1000.0f / theoraAVInfo_.videoFrameRate_) + elapsedTime64_;
     while (audioBufferContainer_.Size() > 0)
     {
-        if (audioBufferContainer_[0]->time_ < advFrameTime)
+        if (audioBufferContainer_[0]->time_ <= elapsedTime64_)
         {
             theoraAudio_->AddData(audioBufferContainer_[0]->buf_, audioBufferContainer_[0]->size_);
             audioBufferContainer_.Erase(0);
